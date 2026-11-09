@@ -120,4 +120,60 @@ describe('ingest', () => {
     expect(d.silences).toEqual([{ start: 200, end: 500 }])
     expect(c.silences).toEqual([]) // c untouched
   })
+
+  it('does not close an open silence when a words event arrives (R25)', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'silenceStart', t: 1000 })
+    s = ingest(s, { type: 'words', t: 1500, totalWords: 5 }) // words during the silence
+    expect(s.openSilenceStart).toBe(1000) // still open
+    expect(s.silences).toEqual([]) // not closed
+    // closing afterward uses the original start, confirming words did not reset it
+    s = ingest(s, { type: 'silenceEnd', t: 2000 })
+    expect(s.silences).toEqual([{ start: 1000, end: 2000 }])
+  })
+
+  it('does not open a silence when a words event arrives with no open silence (R25)', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 100, totalWords: 5 })
+    s = ingest(s, { type: 'words', t: 200, totalWords: 8 })
+    expect(s.openSilenceStart).toBeNull()
+    expect(s.silences).toEqual([])
+  })
+
+  it('ignores invalid timestamps (NaN, Infinity, negative) without throwing', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 100, totalWords: 5 })
+    expect(() => ingest(s, { type: 'words', t: Number.NaN, totalWords: 9 })).not.toThrow()
+    expect(() => ingest(s, { type: 'words', t: Number.POSITIVE_INFINITY, totalWords: 9 })).not.toThrow()
+    expect(() => ingest(s, { type: 'silenceStart', t: -1 })).not.toThrow()
+    // none recorded; state unchanged
+    expect(s.maxTotalWords).toBe(5)
+    expect(s.lastT).toBe(100)
+    expect(s.wordsEvents).toHaveLength(1)
+    expect(s.openSilenceStart).toBeNull()
+  })
+
+  it('ignores invalid totalWords (NaN, non-integer) without throwing', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 100, totalWords: 5 })
+    expect(() => ingest(s, { type: 'words', t: 200, totalWords: Number.NaN })).not.toThrow()
+    expect(() => ingest(s, { type: 'words', t: 300, totalWords: 8.5 })).not.toThrow()
+    expect(s.maxTotalWords).toBe(5) // not updated
+    expect(s.wordsEvents).toHaveLength(1)
+    expect(s.lastT).toBe(100) // ignored events do not advance lastT
+  })
+
+  it('an ignored event does not change lastT (out-of-order, decreasing, invalid)', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 1000, totalWords: 10 })
+    expect(s.lastT).toBe(1000)
+    s = ingest(s, { type: 'words', t: 500, totalWords: 20 }) // out-of-order
+    expect(s.lastT).toBe(1000)
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 3 }) // decreasing
+    expect(s.lastT).toBe(1000)
+    s = ingest(s, { type: 'words', t: Number.NaN, totalWords: 20 }) // invalid t
+    expect(s.lastT).toBe(1000)
+    s = ingest(s, { type: 'words', t: 3000, totalWords: 15.5 }) // invalid totalWords
+    expect(s.lastT).toBe(1000)
+  })
 })

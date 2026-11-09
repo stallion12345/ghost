@@ -12,3 +12,5 @@ export type {
 
 export type { SessionState } from './session'
 export { createSession, ingest } from './session'
+
+export { liveSnapshot, speakingStateAt } from './snapshot'

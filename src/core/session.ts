@@ -14,6 +14,7 @@ export type SessionState = {
   // Start time of the current in-progress silence, or null when not silent.
   openSilenceStart: number | null
   // Closed silence intervals, sorted by start, non-overlapping (R20).
+  // Kept so the snapshot/summary can evaluate silence state at past times t.
   silences: Array<{ start: number; end: number }>
   // Accepted word-count milestones (strictly increasing in totalWords), sorted by t.
   // Used to compute WPM over a trailing window (R5).
@@ -34,6 +35,10 @@ export function createSession(): SessionState {
 // Fold one event into the state. Pure: never mutates `state`; returns a new
 // state, or the same reference when the event is ignored.
 export function ingest(state: SessionState, event: SpeechEvent): SessionState {
+  // Invalid timestamps (NaN, Infinity, negative) are ignored without throwing.
+  if (!Number.isFinite(event.t) || event.t < 0) {
+    return state
+  }
   // Out-of-order (strictly earlier than the last accepted event) is ignored (R2).
   // Equal timestamps are allowed: t === lastT is NOT out-of-order.
   if (event.t < state.lastT) {
@@ -41,6 +46,10 @@ export function ingest(state: SessionState, event: SpeechEvent): SessionState {
   }
 
   if (event.type === 'words') {
+    // Invalid word counts (NaN, non-integer) are ignored without throwing.
+    if (!Number.isFinite(event.totalWords) || !Number.isInteger(event.totalWords)) {
+      return state
+    }
     // Decreasing word count is ignored (R24).
     if (event.totalWords < state.maxTotalWords) {
       return state
@@ -65,7 +74,9 @@ export function ingest(state: SessionState, event: SpeechEvent): SessionState {
   }
 
   if (event.type === 'silenceStart') {
-    // Already silent: ignored (R26).
+    // Already silent: ignored (R26). Only silence events drive silence state
+    // (R25); a `words` event never opens or closes a silence (the words branch
+    // above does not touch openSilenceStart or silences).
     if (state.openSilenceStart !== null) {
       return state
     }
