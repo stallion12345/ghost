@@ -14,3 +14,5 @@ export type { SessionState } from './session'
 export { createSession, ingest } from './session'
 
 export { liveSnapshot, speakingStateAt } from './snapshot'
+
+export { sessionSummary } from './summary'

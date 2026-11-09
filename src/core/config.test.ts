@@ -9,6 +9,7 @@ describe('defaultConfig', () => {
     'steadyMinWpm',
     'steadyMaxWpm',
     'minWindowWords',
+    'minElapsedMs',
     'sampleStepMs',
   ] as const
 

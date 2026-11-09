@@ -1,9 +1,9 @@
 # Core Module (`src/core`) — Design
 
-Source: `.kiro/specs/core/requirements.md` (rev 2, approved with conditions).
-Stage: **Design** (awaiting review). Tasks come later, only after this is approved.
+Source: `.kiro/specs/core/requirements.md` (rev 3 — rev 2 approved, rev 3 adds `minElapsedMs`).
+Stage: **Design** (approved; updated for `minElapsedMs`).
 
-This design is lean: six small files, pure functions, no browser. It explicitly answers the six conditions from your approval (collected in §7) and traces every requirement to a component (§9).
+This design is lean: six small files, pure functions, no browser. It explicitly answers the six conditions from your approval (collected in §8) and traces every requirement to a component (§9).
 
 ## 1. Goals and constraints (recap)
 
@@ -35,7 +35,8 @@ export type CoreConfig = {
   steadyMinWpm: number;      // below this = slow                    (R10)
   steadyMaxWpm: number;      // above this = rushing                  (R10)
   minWindowWords: number;    // below this, WPM is unknown           (R5)
-  sampleStepMs: number;      // fixed step for percentByState sampling (D1/§7.1) — NEW, see note
+  minElapsedMs: number;     // below this elapsed window, WPM is null (R5/D8) — added in rev 3
+  sampleStepMs: number;      // fixed step for percentByState sampling (D1/§7.4) — added by design
 };
 
 export const defaultConfig: CoreConfig = {
@@ -44,11 +45,12 @@ export const defaultConfig: CoreConfig = {
   steadyMinWpm: 110,
   steadyMaxWpm: 170,
   minWindowWords: 5,
+  minElapsedMs: 3000,
   sampleStepMs: 100,
 };
 ```
 
-**Note on `sampleStepMs` (added by this design, per your condition 1).** Requirements §3.2 lists five settings; the fixed-step sampler needs a sixth, `sampleStepMs`. It is a tunable number, so per R21 it lives in `config.ts` and nowhere else. Default **100 ms** (rationale in §7.1). Flagging it as a design addition for your awareness; it does not violate the requirements.
+**Note on the two added settings.** Requirements §3.2 originally listed five settings; this design added `sampleStepMs` (the fixed-step sampler needs it), and rev 3 added `minElapsedMs` (per review, to cap early-session WPM). Both are tunable numbers, so per R21 they live in `config.ts` and nowhere else. Defaults: `sampleStepMs = 100` (rationale in §7.4), `minElapsedMs = 3000` (rationale in §6.2).
 
 All public functions take `config?: CoreConfig` defaulting to `defaultConfig`, so tests pass a custom config without mutating any global (R23).
 
@@ -81,7 +83,7 @@ State is **immutable**: `ingest` returns a new `SessionState` (shallow copy + ne
 Pure. Handles one event; returns new state. Order of checks matters.
 
 ### 5.1 `words` event
-1. If `event.t < state.lastT` → **ignore** (out-of-order, R2). (Equal `t` is allowed — see §7.5.)
+1. If `event.t < state.lastT` → **ignore** (out-of-order, R2). (Equal `t` is allowed — see §8.1.)
 2. If `event.totalWords < state.maxTotalWords` → **ignore** (decreasing word count, R24).
 3. Set `firstT` if null. Update `lastT = event.t`.
 4. If `event.totalWords === state.maxTotalWords` (tie) → **accepted as no-progress**: `lastT` is updated (an event occurred), but no milestone is added and `maxTotalWords` is unchanged. (R24)
@@ -103,16 +105,18 @@ Pure. Handles one event; returns new state. Order of checks matters.
 `liveSnapshot(state, t, config) -> LiveSnapshot`. **`t` is an explicit parameter** (condition 2): the snapshot computes paused from any open silence evaluated *at `t`*, not only at the last event. This lets the live UI sample "now" between/after events. Works for any `t >= 0`; for `t < firstT` it returns `{ t, wpm: null, state: 'steady' }`.
 
 ### 6.1 `wordsAt(state, tau) -> number` (condition 3)
-Returns `totalWords` of the **last accepted words milestone with `t <= tau`**, or `0` if none. Implementation: binary search the rightmost milestone with `t <= tau`. This is the chosen "last event at or before" model (not interpolation). Rationale (§7.3): `totalWords` is a cumulative counter reported only at discrete word events; treating it as a step function held constant between events is the honest model — interpolation would invent speech that didn't occur.
+Returns `totalWords` of the **last accepted words milestone with `t <= tau`**, or `0` if none. Implementation: binary search the rightmost milestone with `t <= tau`. This is the chosen "last event at or before" model (not interpolation). Rationale (§8 C3): `totalWords` is a cumulative counter reported only at discrete word events; treating it as a step function held constant between events is the honest model — interpolation would invent speech that didn't occur.
 
 ### 6.2 `wpmAt(state, t, config) -> number | null`
 1. If `firstT === null` → `null`.
 2. `windowStart = max(firstT, t - windowMs)` (clamp to session start — the early-session fallback, D6/R5).
-3. `windowDuration = t - windowStart` (= `min(windowMs, t - firstT)`). If `windowDuration <= 0` → `null` (R6 guard).
+3. `windowDuration = t - windowStart` (= `min(windowMs, t - firstT)`). If `windowDuration < minElapsedMs` → `null` (R5/D8; this also covers `<= 0` and guards R6). At exactly `minElapsedMs`, WPM computes normally.
 4. `current = wordsAt(state, t)`; `base = wordsAt(state, windowStart)`; `wordsInWindow = current - base`.
-5. The window is half-open `(windowStart, t]`: words at exactly `windowStart` are excluded, words at exactly `t` are included (consequence of "last event at or before" — §7.3).
+5. The window is half-open `(windowStart, t]`: words at exactly `windowStart` are excluded, words at exactly `t` are included (consequence of "last event at or before" — §8 C3).
 6. If `wordsInWindow < minWindowWords` → `null` (R5/D6).
-7. Else `wpm = wordsInWindow / (windowDuration / 60000)`. Always finite and `>= 0` (R6).
+7. Else `wpm = (wordsInWindow * 60000) / windowDuration`. Always finite and `>= 0` (R6).
+
+**Note (design — early WPM reads low by design):** words that arrive exactly at `firstT` sit at the window start and are excluded by the half-open window, so the first words contribute to `totalWords`/milestones but not to an early-window `wordsInWindow`. Combined with `minElapsedMs`, early WPM reads low (or `null`) by design — this avoids inflating the rate from a sub-`minElapsedMs` sample (e.g., a few words in the first 500 ms no longer spike to hundreds of WPM).
 
 ### 6.3 `findSilenceAt(state, t) -> { start: number } | null`
 A time `t` is inside a silence interval iff `t` falls in some `[start, end)` (closed silences) or in `[openSilenceStart, ∞)` (the in-progress one). Intervals are non-overlapping and ordered (R20), so:
@@ -131,7 +135,7 @@ Priority order, highest first (R7):
 `{ t, wpm: wpmAt(state, t, config), state: speakingStateAt(state, t, config) }`.
 `wpm` is reported even when `state === 'paused'` (the rules compute them independently; R7 only prioritizes `state`). The stage layer decides how to render that.
 
-## 7. Summary (`src/core/summary.ts`) — answers conditions 1
+## 7. Summary (`src/core/summary.ts`) — answers condition 1
 
 `sessionSummary(state, endT?, config) -> SessionSummary`.
 
@@ -141,14 +145,14 @@ Priority order, highest first (R7):
 
 ### 7.2 Scalars
 - `firstT = state.firstT ?? 0`.
-- `durationMs = endT - firstT` (clamped `>= 0`; for empty state, `0`). (R12)
+- `durationMs = endT - firstT` (clamped `>= 0`; for empty state, `0`). (R12) This **matches the WPM elapsed-time rule**: WPM's `windowDuration` clamps to `firstT`, so at the session end the WPM "elapsed" is `endT - firstT` = `durationMs` — both measured from `firstT`, the first accepted event's time.
 - `totalWords = state.maxTotalWords`.
 - `averageWpm = durationMs > 0 ? totalWords / (durationMs / 60000) : 0`. Pauses are included (duration is total elapsed time; never subtracted). Guarded against zero/negative duration → `0`. (R13/D7)
 
 ### 7.3 Pauses (for `pauseCount`, `longestPauseMs`)
-A silence is a **counted pause** iff its length exceeds `pauseThresholdMs`:
+A silence is a **counted pause** iff its length exceeds `pauseThresholdMs` (strictly longer):
 - Each closed `silences[i]` with `end - start > pauseThresholdMs`.
-- The open silence if `openSilenceStart !== null && endT - openSilenceStart > pauseThresholdMs` (R14, evaluated at clamped `endT`).
+- The open silence if `openSilenceStart !== null && endT - openSilenceStart > pauseThresholdMs` (R14, evaluated at clamped `endT` — counts only if longer than the threshold).
 - `pauseCount` = number of counted pauses (R14, R19).
 - `longestPauseMs` = max length among counted pauses, or `0`. By construction `>=` every counted pause (R15).
 
@@ -157,7 +161,7 @@ A silence is a **counted pause** iff its length exceeds `pauseThresholdMs`:
 - **Else**: sample at fixed step `sampleStepMs` from `0` to `endT` inclusive:
   - sample times `T = [0, step, 2*step, …, k*step]` where `k = floor(endT / step)`, **plus a final sample at `endT`** if `endT` is not already a multiple of `step`. So the endpoint is always sampled (captures a final in-progress pause).
   - For each `t_i` in `T`: `st = speakingStateAt(state, t_i, config)`; increment `count[st]`.
-  - `N = |T|` (>= 1). `percentByState[s] = (count[s] / N) * 100` for each `s`.
+  - `N = |T|` (>= 1). `percentByState[s] = (count[s] / N) * 100` for each `s`, divided once at the end.
 - **Sum is 100 by construction** when `durationMs > 0`: every sample is classified into exactly one state, so `Σ count[s] = N` and `Σ percentByState[s] = 100` (within float tolerance < 0.01, satisfying T2). (R16)
 - Determinism: classification is a pure function of `(state, t_i, config)`; the sample grid is fixed; therefore `percentByState` is deterministic. (R3)
 - **Integer-count basis / invariants-only testing:** `percentByState[s] = (count[s] / N) * 100` is derived from the **integer** sample counts `count[s]`. Tests assert **invariants only** — sum is 100 (±0.01) when `durationMs > 0`, each value in `[0, 100]`, all zeros when `durationMs === 0`, all four keys present — never exact percentage values, since those depend on the sample grid and step size.
@@ -172,11 +176,14 @@ For review, each condition and the design's answer:
 - **C2 — snapshot takes `t` as a parameter and computes `paused` at `t`.** `liveSnapshot(state, t, config)`; `paused` is derived from any open silence evaluated at `t` via `findSilenceAt`, not only when an event arrives. See §6.
 - **C3 — words-in-window from cumulative `totalWords` at window start.** Chosen: **last milestone at or before the window-start time** (binary search), not interpolation. Window is half-open `(windowStart, t]`; `wordsInWindow = wordsAt(t) − wordsAt(windowStart)`. See §6.1–6.2.
 - **C4 — determinism property test clarified.** The property is: *calling a read function twice on the same state returns structurally equal output* (`liveSnapshot(S, t)` twice; `sessionSummary(S, endT)` twice). It is **not** "ingest `E` then ingest `E` again appended." Separately, R3's re-run property is: build state from `E` twice from a fresh start → equal states → equal outputs. Both are purity tests of reads, neither concatenates the sequence with itself. See §10.2.
-- **C5 — equal timestamps.** **Allowed.** Timestamps must be **non-decreasing** (`event.t >= lastT`), not strictly increasing; `event.t === lastT` is accepted (not ignored by R2). Edge handling is already defined: a `silenceStart`/`silenceEnd` at the same `t` yields a 0-length interval (never paused, never counted); ties in `totalWords` at the same `t` are accepted as no-progress. *Reconciliation with the generator:* the "valid sequences: increasing timestamps" wording in your instruction is read as **non-decreasing** to match this decision. See §7.5 / §10.3.
+- **C5 — equal timestamps.** **Allowed.** Timestamps must be **non-decreasing** (`event.t >= lastT`), not strictly increasing; `event.t === lastT` is accepted (not ignored by R2). Edge handling is already defined: a `silenceStart`/`silenceEnd` at the same `t` yields a 0-length interval (never paused, never counted); ties in `totalWords` at the same `t` are accepted as no-progress. *Reconciliation with the generator:* the "valid sequences: increasing timestamps" wording in your instruction is read as **non-decreasing** to match this decision. See §8.1 / §10.3.
 - **C6 — fast-check event-sequence generator as its own task.** Not built in design; specified here so `tasks.md` can include it as a standalone task. Acceptance: a reusable generator producing **valid** sequences — non-decreasing timestamps, non-decreasing (cumulative) word counts, balanced silences (every `silenceStart` has a later `silenceEnd`; no two `silenceStart`s without a `silenceEnd` between; no `silenceEnd` without an open `silenceStart`). A companion "dirty" strategy injects out-of-order timestamps, decreasing word counts, duplicate `silenceStart`, and stray `silenceEnd` to exercise the ignore rules (R2, R24, R26). See §10.3.
 
 ### 8.1 Equal-timestamp note (possible veto point)
 Because your generator wording said "increasing" and I decided equal timestamps are allowed, the generator will produce non-decreasing timestamps. If you actually want **strictly increasing** timestamps (forbid equal `t`), say so and I will (a) change the decision to forbid equal `t`, (b) make the generator strictly increasing, and (c) drop the equal-`t` edge handling (or keep it only as a documented "should not occur" guard). Flagging so you can veto.
+
+### 8.2 `minElapsedMs` note (added in rev 3)
+`minElapsedMs` (default 3000) gates WPM by elapsed window duration, symmetric to `minWindowWords` (which gates by word count). It returns `null` while `windowDuration < minElapsedMs`, so the first ~3 s of a session show `null` WPM (ghost steady/neutral) even if the speaker is talking fast, preventing sub-second spikes. Tradeoff: a short warm-up where the WPM dial reads "unknown." See §6.2 and the half-open-window note there.
 
 ## 9. File → requirement traceability
 
@@ -189,7 +196,7 @@ Because your generator wording said "increasing" and I decided equal timestamps 
 | R25 (silence only from silence events) | `session.ts` §5.1 step 6 |
 | R26 (dup start / stray end ignored) | `session.ts` §5.2 step 2, §5.3 step 2 |
 | R4 (snapshot at recent `t`) | `snapshot.ts` `liveSnapshot` |
-| R5 (window, early-session, null until min words) | `snapshot.ts` `wpmAt` §6.2 |
+| R5 (window, early-session, minElapsedMs, minWindowWords) | `snapshot.ts` `wpmAt` §6.2 |
 | R6 (wpm never neg/NaN/Inf) | `snapshot.ts` `wpmAt` guards |
 | R7 (state priority) | `snapshot.ts` `speakingStateAt` §6.4 |
 | R8 (paused from open silence > threshold) | `snapshot.ts` `findSilenceAt` + `speakingStateAt` |
@@ -198,7 +205,7 @@ Because your generator wording said "increasing" and I decided equal timestamps 
 | R11/R27 (endT default + clamp) | `summary.ts` §7.1 |
 | R12 (durationMs) | `summary.ts` §7.2 |
 | R13 (averageWpm, pauses included) | `summary.ts` §7.2 |
-| R14 (pauseCount incl. in-progress) | `summary.ts` §7.3 |
+| R14 (pauseCount incl. in-progress, only if > threshold) | `summary.ts` §7.3 |
 | R15 (longestPauseMs) | `summary.ts` §7.3 |
 | R16/R17 (percentByState sum/all-zeros) | `summary.ts` §7.4 |
 | R18 (never NaN/Inf) | guards in `wpmAt`, `summary.ts` |
@@ -212,7 +219,7 @@ A3 (no imports from audio/stage/pdf/DOM) is enforced by keeping `core/` self-con
 ## 10. Testing strategy
 
 ### 10.1 Unit tests (T1)
-One describe-block per public function: `createSession`, `ingest` (per event type + each ignore rule), `liveSnapshot` (incl. early-session, paused-at-`t` between events), `sessionSummary` (incl. empty session, in-progress pause, `endT` clamp). Plus targeted edge cases: equal timestamps, 0-length silences, ties in `totalWords`. For `sessionSummary`'s `percentByState`, unit tests assert **invariants only** (sum, range, all-zeros, key presence), never exact percentages.
+One describe-block per public function: `createSession`, `ingest` (per event type + each ignore rule), `liveSnapshot` (incl. early-session, paused-at-`t` between events), `sessionSummary` (incl. empty session, in-progress pause, `endT` clamp). Plus targeted edge cases: equal timestamps, 0-length silences, ties in `totalWords`, `minElapsedMs` boundary (2999/3000 ms). For `sessionSummary`'s `percentByState`, unit tests assert **invariants only** (sum, range, all-zeros, key presence), never exact percentages.
 
 ### 10.2 Property tests (T2) — including the determinism clarification (C4)
 Each invariant in requirements T2 gets a dedicated `fast-check` test:
@@ -227,7 +234,7 @@ Each invariant in requirements T2 gets a dedicated `fast-check` test:
 - Raising `pauseThresholdMs` never increases `pauseCount` (R22).
 - A `words` event never starts/ends/resets a silence (R25).
 - A `words` event with decreasing `totalWords` is ignored and changes no output (R24).
-- Early-session `wpm` is `null` until `>= minWindowWords` words in the window (R5).
+- Early-session `wpm` is `null` until `windowDuration >= minElapsedMs` **and** `>= minWindowWords` words in the window (R5).
 - `endT` clamped to `>= lastT`; summary stable for any `endT >= lastT` (R27).
 
 ### 10.3 Event-sequence generator (own task — C6)
@@ -245,9 +252,4 @@ Specified here; implemented as a standalone task in `tasks.md`. Two strategies:
 
 ---
 
-**Status: Design complete. Stopping for your review.**
-Two things to confirm before I generate tasks:
-1. **§8.1 — equal timestamps:** keep allowed (non-decreasing generator), or forbid (strictly increasing)? Default: allowed.
-2. **`sampleStepMs = 100`** as the new config tunable — acceptable, or a different value?
-
-Approve (with or without changes to those two) and I'll generate the task list, then run only task 1 and stop.
+**Status: Design updated for `minElapsedMs` (rev 3 of requirements). Approved earlier; `minElapsedMs` reflected here per review.**

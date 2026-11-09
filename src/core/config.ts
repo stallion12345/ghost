@@ -12,6 +12,8 @@ export type CoreConfig = {
   steadyMaxWpm: number
   /** Below this word count in the window, WPM is treated as unknown. */
   minWindowWords: number
+  /** Minimum elapsed window (ms) before WPM is reported; below this WPM is null (R5/D8). */
+  minElapsedMs: number
   /** Fixed step (ms) for percentByState sampling (design §7.4). */
   sampleStepMs: number
 }
@@ -22,5 +24,6 @@ export const defaultConfig: CoreConfig = {
   steadyMinWpm: 110,
   steadyMaxWpm: 170,
   minWindowWords: 5,
+  minElapsedMs: 3000,
   sampleStepMs: 100,
 }

@@ -1,7 +1,7 @@
 # Core Module (`src/core`) — Requirements
 
 Source: `.kiro/specs/spec.md` section 5 (the product spec mistakenly calls itself `docs/spec.md`).
-Stage: **Requirements** (awaiting review, rev 2). Design and tasks come later, only after these are approved.
+Stage: **Requirements** (rev 2 approved; rev 3 adds `minElapsedMs` per review). Design and tasks follow.
 
 ## 1. Purpose
 
@@ -54,6 +54,7 @@ All tunable numbers live here and are exported from one place. No thresholds are
 | `steadyMinWpm` | 110 | below this, speaking is `slow` |
 | `steadyMaxWpm` | 170 | above this, speaking is `rushing` |
 | `minWindowWords` | 5 | below this word count in the window, WPM is treated as unknown |
+| `minElapsedMs` | 3000 | minimum elapsed window (ms) before WPM is reported; below this WPM is `null` (R5/D8) |
 
 ### 3.3 Outputs
 
@@ -94,7 +95,7 @@ Each requirement has an ID so design and tasks can reference it.
 
 ### Live snapshot
 - **R4** — At any point, core can produce a `LiveSnapshot` for the most recently processed time `t`.
-- **R5** — `wpm` is computed from the words spoken within the trailing `windowMs` window, using cumulative `totalWords`. Early in the session, when elapsed time since the first event is less than `windowMs`, the window is the **elapsed time so far** rather than the full `windowMs` (the window is clamped to session start). `wpm` is `null` until at least `minWindowWords` words have been spoken within the window/elapsed period.
+- **R5** — `wpm` is computed from the words spoken within the trailing `windowMs` window, using cumulative `totalWords`. Early in the session, when elapsed time since the first event is less than `windowMs`, the window is the **elapsed time so far** rather than the full `windowMs` (the window is clamped to session start). `wpm` is `null` until the window/elapsed duration is at least `minElapsedMs` **and** at least `minWindowWords` words have been spoken within it. Elapsed time is measured from `firstT` (the first accepted event's time), not a fixed session start of 0. At exactly `minElapsedMs`, WPM computes normally.
 - **R6** — `wpm` is never negative, `NaN`, or `Infinity`. Division-by-zero and empty-window cases yield `null`, never a bad number.
 - **R7** — `state` is derived by priority, highest first: `paused` → `rushing` → `slow` → `steady`. The first matching rule wins.
 - **R8** — `paused` holds when there is an open silence (a `silenceStart` with no matching `silenceEnd` yet, per R25/R26) and, as of `t`, it has lasted longer than `pauseThresholdMs`.
@@ -143,7 +144,7 @@ Each requirement has an ID so design and tasks can reference it.
   - Raising `pauseThresholdMs` never increases `pauseCount` (R22).
   - A `words` event never starts, ends, or resets a silence (R25).
   - A `words` event with decreasing `totalWords` is ignored and changes no output (R24).
-  - Early-session `wpm` is `null` until at least `minWindowWords` words are in the window (R5).
+  - Early-session `wpm` is `null` until the elapsed window is at least `minElapsedMs` **and** at least `minWindowWords` words are in the window (R5).
   - `endT` is clamped to ≥ last event `t`; the summary is stable for any `endT` ≥ last event (R27).
 - **T3** — Tests do not depend on a browser, clock, or audio.
 - **T4** — Tests are not weakened or deleted to make code pass. If a test seems wrong, the reason is reported rather than the test being silently changed.
@@ -167,12 +168,12 @@ Recorded for traceability so design and tasks can reference them.
 - **D5 (new b)** — A decreasing `totalWords` is ignored. Baked into R24; covered by T2.
 - **D6 (new c)** — Early-session WPM uses elapsed time instead of the full window, and is `null` until `minWindowWords` is reached. Baked into R5; covered by T2.
 - **D7 (new d)** — `averageWpm` is `totalWords` divided by total duration in minutes, with pauses included. Baked into R13.
+- **D8 (added in rev 3)** — `minElapsedMs` (default 3000) added to `config.ts`: `wpmAt` returns `null` when the elapsed window is `< minElapsedMs` (so exactly equal computes). Prevents sub-`minElapsedMs` early-session WPM spikes (a few words in < 3000 ms inflating to hundreds of WPM). Baked into R5 and the config table.
 
 ## 9. Remaining open questions
 
-None. All questions from rev 1 are resolved (D1–D7).
+None.
 
 ---
 
-**Status: Requirements complete (rev 2). Stopping for your review before design.**
-Approve, or tell me what to change. Once approved I'll generate the design (and stop again).
+**Status: Requirements updated to rev 3 (rev 2 was approved; rev 3 adds `minElapsedMs` per review).**

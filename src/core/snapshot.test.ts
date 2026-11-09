@@ -16,13 +16,7 @@ describe('liveSnapshot', () => {
 
 describe('speakingStateAt', () => {
   it('classifies state from wpm bands (slow / steady / rushing)', () => {
-    const cfg = {
-      ...defaultConfig,
-      windowMs: 10000,
-      minWindowWords: 5,
-      steadyMinWpm: 100,
-      steadyMaxWpm: 200,
-    }
+    const cfg = { ...defaultConfig, steadyMinWpm: 100, steadyMaxWpm: 200 }
     // words at t=0 is a no-progress tie (no milestone); words at t=10000 sets the count.
     // wpm at t=10000 = finalCount * 60000 / 10000 = finalCount * 6.
     const build = (finalCount: number) => {
@@ -75,18 +69,18 @@ describe('speakingStateAt', () => {
 describe('liveSnapshot (windowing)', () => {
   it('uses only events at or before t (past t values work)', () => {
     let s = createSession()
-    s = ingest(s, { type: 'words', t: 500, totalWords: 5 })
-    s = ingest(s, { type: 'silenceStart', t: 1000 })
-    // recorded during the open silence (R25: words don't close a silence)
-    s = ingest(s, { type: 'words', t: 2500, totalWords: 15 })
-    s = ingest(s, { type: 'silenceEnd', t: 4000 })
-    // t=2000 is before the t=2500 milestone → it must not be used
-    const past = liveSnapshot(s, 2000, defaultConfig)
-    expect(past.wpm).toBeNull() // milestone at 2500 excluded; wordsInWindow 0
-    expect(past.state).toBe('steady') // inside closed silence but elapsed 1000 <= threshold; wpm null
-    // t=2600 includes the t=2500 milestone
-    const later = liveSnapshot(s, 2600, defaultConfig)
+    s = ingest(s, { type: 'words', t: 1000, totalWords: 3 }) // firstT = 1000
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 8 })
+    s = ingest(s, { type: 'words', t: 5000, totalWords: 20 }) // milestone to exclude/include
+    // t=4500 is before the t=5000 milestone (excluded); windowDuration = 3500ms (>= minElapsedMs 3000)
+    // wordsInWindow = 8 - 3 = 5 over 3500 ms → ~85.7 wpm
+    const past = liveSnapshot(s, 4500, defaultConfig)
+    expect(past.wpm).not.toBeNull()
+    expect(Number(past.wpm)).toBeCloseTo(85.714, 1)
+    // t=5500 includes the t=5000 milestone; wordsInWindow = 20 - 3 = 17 over 4500 ms → ~226.7 wpm
+    const later = liveSnapshot(s, 5500, defaultConfig)
     expect(later.wpm).not.toBeNull()
+    expect(Number(later.wpm)).toBeCloseTo(226.667, 1)
   })
 
   it('wpm is null at t=0 and when elapsed time is zero (never Infinity/NaN)', () => {
@@ -106,7 +100,87 @@ describe('liveSnapshot (windowing)', () => {
     s = ingest(s, { type: 'words', t: 500, totalWords: 10 }) // equal t, higher count
     s = ingest(s, { type: 'words', t: 2000, totalWords: 20 })
     // t=5500: window [500, 5500]. base = last milestone at t<=500 = 10 (not 5).
-    // wordsInWindow = 20 - 10 = 10 → wpm = 10 * 60000 / 5000 = 120
-    expect(liveSnapshot(s, 5500, cfg).wpm).toBeCloseTo(120, 6)
+    // wordsInWindow = 20 - 10 = 10 over 5000 ms → 120 wpm
+    expect(Number(liveSnapshot(s, 5500, cfg).wpm)).toBeCloseTo(120, 6)
+  })
+})
+
+describe('firstT and early-session WPM', () => {
+  it('firstT is the first event time; single early milestone at t=2000, snapshot at t=2500 → steady/null', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 6 })
+    const snap = liveSnapshot(s, 2500, defaultConfig)
+    // windowDuration = 500 ms < minElapsedMs (3000) → wpm null (not inflated)
+    expect(snap.wpm).toBeNull()
+    expect(snap.state).toBe('steady')
+  })
+
+  it('two early milestones in a short window are reported as unknown (null/steady) due to minElapsedMs', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 6 })
+    s = ingest(s, { type: 'words', t: 2400, totalWords: 12 })
+    const snap = liveSnapshot(s, 2500, defaultConfig)
+    // windowDuration = 500 ms < minElapsedMs (3000) → null, even though wordsInWindow would be 6
+    expect(snap.wpm).toBeNull()
+    expect(snap.state).toBe('steady')
+  })
+})
+
+describe('minElapsedMs boundary', () => {
+  it('2999 ms elapsed → null (below minElapsedMs)', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 1000, totalWords: 3 }) // firstT = 1000
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 9 })
+    // t = 3999 → windowDuration = 2999 ms < minElapsedMs (3000) → null
+    expect(liveSnapshot(s, 3999, defaultConfig).wpm).toBeNull()
+  })
+
+  it('3000 ms elapsed → computes (exactly equal to minElapsedMs)', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'words', t: 1000, totalWords: 3 })
+    s = ingest(s, { type: 'words', t: 2000, totalWords: 9 })
+    // t = 4000 → windowDuration = 3000 ms (== minElapsedMs) → computes.
+    // wordsInWindow = 9 - 3 = 6 over 3000 ms → 120 wpm
+    expect(Number(liveSnapshot(s, 4000, defaultConfig).wpm)).toBeCloseTo(120, 6)
+  })
+})
+
+describe('closed silence state across the threshold', () => {
+  it('closed silence [1000, 4000) is steady at t=2900 (1900 ms in) and paused at t=3500', () => {
+    let s = createSession()
+    s = ingest(s, { type: 'silenceStart', t: 1000 })
+    s = ingest(s, { type: 'silenceEnd', t: 4000 }) // closed [1000, 4000)
+    expect(speakingStateAt(s, 2900, defaultConfig)).toBe('steady') // elapsed 1900 <= 2000
+    expect(speakingStateAt(s, 3500, defaultConfig)).toBe('paused') // elapsed 2500 > 2000
+  })
+})
+
+describe('liveSnapshot performance', () => {
+  it('runs 10,000 liveSnapshots on a 20,000-event / 30-min session in under 3 seconds', () => {
+    const durationMs = 30 * 60 * 1000 // 1,800,000 ms
+    const eventCount = 20000
+    let s = createSession()
+    for (let i = 0; i < eventCount; i++) {
+      const t = Math.round((i / eventCount) * durationMs)
+      const phase = i % 10
+      if (phase < 8) {
+        s = ingest(s, { type: 'words', t, totalWords: i + 1 })
+      } else if (phase === 8) {
+        s = ingest(s, { type: 'silenceStart', t })
+      } else {
+        s = ingest(s, { type: 'silenceEnd', t })
+      }
+    }
+    expect(s.wordsEvents.length).toBeGreaterThan(1000)
+    expect(s.silences.length).toBeGreaterThan(100)
+
+    const samples = 10000
+    const start = performance.now()
+    for (let i = 0; i < samples; i++) {
+      const t = Math.round((i / samples) * durationMs)
+      liveSnapshot(s, t, defaultConfig)
+    }
+    const elapsedMs = performance.now() - start
+    expect(elapsedMs).toBeLessThan(3000)
   })
 })

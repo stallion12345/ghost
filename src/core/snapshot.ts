@@ -59,8 +59,8 @@ function wpmAt(state: SessionState, t: number, config: CoreConfig): number | nul
   // Early in the session, clamp the window to the session start (D6/R5).
   const windowStart = Math.max(firstT, t - config.windowMs)
   const windowDuration = t - windowStart
-  if (windowDuration <= 0) {
-    return null // never Infinity/NaN (R6)
+  if (windowDuration < config.minElapsedMs) {
+    return null // not enough elapsed time yet (R5/D8); also guards NaN/Infinity (R6)
   }
   // Window is half-open (windowStart, t]: words at windowStart are excluded,
   // words at t are included (last milestone at or before each bound) — design §6.
